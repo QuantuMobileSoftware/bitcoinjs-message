@@ -1,8 +1,17 @@
 var bs58check = require('bs58check')
 var bufferEquals = require('buffer-equals')
 var createHash = require('create-hash')
-var secp256k1 = require('secp256k1')
+var EC = require('elliptic').ec
+var BN = require('bn.js')
 var varuint = require('varuint-bitcoin')
+var ec = null
+
+function getEC () {
+  if (ec === null) {
+    ec = new EC('secp256k1')
+  }
+  return ec
+}
 
 function sha256 (b) {
   return createHash('sha256').update(b).digest()
@@ -46,8 +55,28 @@ function magicHash (message, messagePrefix) {
 
 function sign (message, privateKey, compressed, messagePrefix) {
   var hash = magicHash(message, messagePrefix)
-  var sigObj = secp256k1.sign(hash, privateKey)
-  return encodeSignature(sigObj.signature, sigObj.recovery, compressed)
+  var eccrypto = getEC()
+  var sigObj = eccrypto.sign(hash, privateKey, {canonical: true})
+  var signature = Buffer.concat([sigObj.r.toArrayLike(Buffer, 'be', 32), sigObj.s.toArrayLike(Buffer, 'be', 32)])
+  return encodeSignature(signature, sigObj.recoveryParam, compressed)
+}
+
+function recover (message, signature, recovery, compressed) {
+  var sigObj = { r: signature.slice(0, 32), s: signature.slice(32, 64) }
+
+  var eccrypto = getEC()
+  var sigr = new BN(sigObj.r)
+  var sigs = new BN(sigObj.s)
+  if (sigr.cmp(eccrypto.curve.n) >= 0 || sigs.cmp(eccrypto.curve.n) >= 0) throw new Error("couldn't parse signature")
+
+  try {
+    if (sigr.isZero() || sigs.isZero()) throw new Error()
+
+    var point = eccrypto.recoverPubKey(message, sigObj, recovery)
+    return Buffer.from(point.encode(true, compressed))
+  } catch (err) {
+    throw new Error("couldn't recover public key from signature")
+  }
 }
 
 function verify (message, address, signature, messagePrefix) {
@@ -55,7 +84,7 @@ function verify (message, address, signature, messagePrefix) {
 
   var parsed = decodeSignature(signature)
   var hash = magicHash(message, messagePrefix)
-  var publicKey = secp256k1.recover(hash, parsed.signature, parsed.recovery, parsed.compressed)
+  var publicKey = recover(hash, parsed.signature, parsed.recovery, parsed.compressed)
 
   var actual = hash160(publicKey)
   var expected = bs58check.decode(address).slice(1)
